@@ -1,0 +1,844 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no" />
+<title>Bloom — Period Tracker</title>
+<link rel="icon" href="data:,">
+<meta name="theme-color" content="#3E1F38">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap');
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; }
+  body { background: #FFFBF7; }
+  #root { min-height: 100vh; }
+  .ptr-daybtn:focus-visible, .ptr-nav:focus-visible, .ptr-tab:focus-visible, .ptr-chip:focus-visible { outline: 2px solid #3E1F38; outline-offset: 2px; }
+  @media print {
+    .no-print { display: none !important; }
+    .print-only { display: block !important; }
+  }
+  .print-only { display: none; }
+</style>
+</head>
+<body>
+<div id="root">
+  <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:sans-serif;color:#8A7A85;text-align:center;padding:20px;">
+    Loading Bloom…<br/><span id="fallback-msg" style="font-size:12px;margin-top:8px;display:block;"></span>
+  </div>
+</div>
+
+<script>
+  window.addEventListener('error', function (e) {
+    var el = document.getElementById('fallback-msg');
+    if (el) el.textContent = 'Error: ' + (e.message || 'unknown error') + ' (line ' + e.lineno + ')';
+  });
+</script>
+<script crossorigin src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo } = React;
+
+const API_BASE = "https://period-tracker-fsgd.onrender.com";
+
+const LIGHT = {
+  plum: "#3E1F38", plumSoft: "#6B3D63", rose: "#C97B84", roseSoft: "#EFD3D6",
+  gold: "#C79A4B", goldSoft: "#F1E3C6", sage: "#8B9574", sageSoft: "#E4E7DA",
+  paper: "#FFFBF7", card: "#FFFFFF", ink: "#2B1E29", inkFaint: "#8A7A85",
+  danger: "#B34A4A", border: "#EFD3D6", shadow: "0 1px 3px rgba(62,31,56,0.08)",
+};
+const DARK = {
+  plum: "#E9BEDE", plumSoft: "#C79FC0", rose: "#E0949C", roseSoft: "#4A2E33",
+  gold: "#E0B96E", goldSoft: "#453A22", sage: "#AFBB96", sageSoft: "#333B29",
+  paper: "#1C1420", card: "#28202C", ink: "#F3E9F0", inkFaint: "#B7A2B4",
+  danger: "#E08A8A", border: "#3D2E3B", shadow: "0 1px 3px rgba(0,0,0,0.35)",
+};
+
+const MS_DAY = 86400000;
+const toKey = (d) => d.toISOString().slice(0, 10);
+const fromKey = (k) => { const [y, m, d] = k.split("-").map(Number); return new Date(y, m - 1, d); };
+const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+const sameDay = (a, b) => toKey(a) === toKey(b);
+const monthKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+const isValidEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim());
+
+const SYMPTOMS = ["Cramps", "Headache", "Fatigue", "Bloating", "Acne", "Backache", "Nausea", "Tender breasts", "Cravings"];
+const MOODS = [
+  { key: "happy", label: "Happy" }, { key: "calm", label: "Calm" }, { key: "sad", label: "Sad" },
+  { key: "anxious", label: "Anxious" }, { key: "irritable", label: "Irritable" }, { key: "energetic", label: "Energetic" },
+];
+const FLOWS = [
+  { key: "light", label: "Light" }, { key: "medium", label: "Medium" }, { key: "heavy", label: "Heavy" },
+];
+
+async function apiGetEntries(email) {
+  const res = await fetch(`${API_BASE}/api/entries?email=${encodeURIComponent(email)}`);
+  if (!res.ok) throw new Error("Failed to load entries");
+  const data = await res.json();
+  return data.entries || [];
+}
+async function apiSaveEntry(email, date, entry) {
+  const res = await fetch(`${API_BASE}/api/entries`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, date, is_period: entry.period, flow: entry.flow, symptoms: entry.symptoms, mood: entry.mood }),
+  });
+  if (!res.ok) throw new Error("Failed to save entry");
+  return res.json();
+}
+async function apiDeleteEntries(email, dates) {
+  const res = await fetch(`${API_BASE}/api/entries/delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, dates }),
+  });
+  if (!res.ok) throw new Error("Failed to delete entries");
+  return res.json();
+}
+async function apiReset(email) {
+  const res = await fetch(`${API_BASE}/api/reset`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) throw new Error("Failed to reset");
+  return res.json();
+}
+
+function computeCycles(periodStartKeys) {
+  const starts = [...periodStartKeys].sort();
+  const lengths = [];
+  for (let i = 1; i < starts.length; i++) {
+    const diff = Math.round((fromKey(starts[i]) - fromKey(starts[i - 1])) / MS_DAY);
+    if (diff > 10 && diff < 60) lengths.push(diff);
+  }
+  const avgCycle = lengths.length ? Math.round(lengths.reduce((a, b) => a + b, 0) / lengths.length) : 28;
+  return { starts, avgCycle, lengths };
+}
+
+const PHASES = [
+  { key: "menstrual", label: "Menstrual", color: "#C97B84", range: [1, 5] },
+  { key: "follicular", label: "Follicular", color: "#8B9574", range: [6, 12] },
+  { key: "ovulation", label: "Ovulation", color: "#C79A4B", range: [13, 16] },
+  { key: "luteal", label: "Luteal", color: "#6B3D63", range: [17, 28] },
+];
+function phaseForDay(dayInCycle, cycleLen) {
+  const scaled = Math.max(1, Math.min(cycleLen, dayInCycle));
+  const ratio = scaled / cycleLen;
+  const idx = ratio <= 5 / 28 ? 0 : ratio <= 12 / 28 ? 1 : ratio <= 16 / 28 ? 2 : 3;
+  return PHASES[idx];
+}
+
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: LIGHT.paper }}>
+          <div style={{ fontFamily: "'Inter', sans-serif", color: LIGHT.danger, fontSize: 13, padding: 16, textAlign: "center" }}>
+            Something went wrong: {String(this.state.error.message || this.state.error)}
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function PeriodTrackerAppInner() {
+  const [email, setEmail] = useState(null);
+  const [emailInput, setEmailInput] = useState("");
+  const [inputError, setInputError] = useState("");
+  const [darkMode, setDarkMode] = useState(false);
+  const C = darkMode ? DARK : LIGHT;
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("bloom-last-email");
+      if (saved) setEmail(saved);
+    } catch (e) {}
+    try {
+      if (localStorage.getItem("bloom-theme") === "dark") setDarkMode(true);
+    } catch (e) {}
+  }, []);
+
+  const toggleTheme = () => {
+    const next = !darkMode;
+    setDarkMode(next);
+    try { localStorage.setItem("bloom-theme", next ? "dark" : "light"); } catch (e) {}
+  };
+
+  const signIn = (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    if (!isValidEmail(emailInput)) { setInputError("Please enter a valid email address"); return; }
+    const clean = emailInput.trim().toLowerCase();
+    try { localStorage.setItem("bloom-last-email", clean); } catch (err) {}
+    setEmail(clean);
+  };
+
+  const signOut = () => {
+    try { localStorage.removeItem("bloom-last-email"); } catch (e) {}
+    setEmail(null);
+    setEmailInput("");
+  };
+
+  const styles = getStyles(C);
+
+  if (!email) {
+    return (
+      <div style={{ ...styles.app, justifyContent: "center" }}>
+        <div style={{ textAlign: "center", marginBottom: 28 }}>
+          <div style={styles.eyebrow}>CYCLE</div>
+          <h1 style={styles.title}>Bloom</h1>
+          <div style={{ color: C.inkFaint, fontSize: 13, marginTop: 6 }}>Sign in with your email to track your cycle</div>
+        </div>
+        <div style={styles.loginCard}>
+          <label style={styles.label} htmlFor="email">Email address</label>
+          <input
+            id="email" type="email" value={emailInput}
+            onChange={(e) => { setEmailInput(e.target.value); setInputError(""); }}
+            onKeyDown={(e) => { if (e.key === "Enter") signIn(e); }}
+            placeholder="you@example.com" style={styles.input} autoFocus
+          />
+          {inputError && <div style={styles.errorText}>{inputError}</div>}
+          <button type="button" onClick={signIn} style={styles.primaryBtn}>Continue</button>
+          <div style={styles.note}>
+            Your data is saved to your account under this email — no password, no verification.
+            Anyone who enters the same email can see this history, so use one only you know.
+            You'll also get an email reminder 3 days before your predicted period.
+          </div>
+        </div>
+        <button style={styles.themeToggleStandalone} onClick={toggleTheme}>
+          {darkMode ? "☀ Light mode" : "☾ Dark mode"}
+        </button>
+      </div>
+    );
+  }
+
+  return <Dashboard email={email} onSignOut={signOut} C={C} darkMode={darkMode} toggleTheme={toggleTheme} />;
+}
+
+function PeriodTrackerApp() {
+  return (<ErrorBoundary><PeriodTrackerAppInner /></ErrorBoundary>);
+}
+
+function Dashboard({ email, onSignOut, C, darkMode, toggleTheme }) {
+  const styles = getStyles(C);
+  const [dayDetails, setDayDetails] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [waking, setWaking] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const [viewMonth, setViewMonth] = useState(startOfDay(new Date()));
+  const [avgPeriodLen] = useState(5);
+  const [toast, setToast] = useState("");
+  const [tab, setTab] = useState("track");
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [sheetDate, setSheetDate] = useState(null);
+
+  const loadEntries = async () => {
+    setLoading(true);
+    setLoadError("");
+    const wakeTimer = setTimeout(() => setWaking(true), 3000);
+    try {
+      const entries = await apiGetEntries(email);
+      const details = {};
+      entries.forEach((e) => {
+        details[e.entry_date] = { period: !!e.is_period, flow: e.flow || null, symptoms: e.symptoms || [], mood: e.mood || null };
+      });
+      setDayDetails(details);
+    } catch (err) {
+      setLoadError("Couldn't reach the server. It may be waking up — try again in a moment.");
+    } finally {
+      clearTimeout(wakeTimer);
+      setWaking(false);
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { loadEntries(); /* eslint-disable-next-line */ }, [email]);
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2500); };
+
+  const saveDay = async (key, entry) => {
+    const prev = dayDetails;
+    const isEmpty = !entry.period && (!entry.symptoms || entry.symptoms.length === 0) && !entry.mood;
+    const next = { ...dayDetails };
+    if (isEmpty) delete next[key]; else next[key] = entry;
+    setDayDetails(next);
+    try {
+      await apiSaveEntry(email, key, entry);
+    } catch (err) {
+      setDayDetails(prev);
+      showToast("Couldn't save — check connection and try again");
+    }
+  };
+
+  const deleteEntryRange = async (keys) => {
+    const prev = dayDetails;
+    const next = { ...dayDetails };
+    keys.forEach((k) => delete next[k]);
+    setDayDetails(next);
+    try {
+      await apiDeleteEntries(email, keys);
+      showToast("Entry deleted");
+    } catch (err) {
+      setDayDetails(prev);
+      showToast("Couldn't delete — try again");
+    }
+  };
+
+  const resetAll = async () => {
+    const prev = dayDetails;
+    setDayDetails({});
+    setConfirmReset(false);
+    try {
+      await apiReset(email);
+      showToast("History cleared");
+    } catch (err) {
+      setDayDetails(prev);
+      showToast("Couldn't reset — try again");
+    }
+  };
+
+  const periodDays = useMemo(() => new Set(Object.keys(dayDetails).filter((k) => dayDetails[k].period)), [dayDetails]);
+
+  const periodStartKeys = useMemo(() => {
+    const sorted = [...periodDays].sort();
+    const starts = []; let prev = null;
+    for (const k of sorted) {
+      if (!prev || (fromKey(k) - fromKey(prev)) / MS_DAY > 1.5) starts.push(k);
+      prev = k;
+    }
+    return starts;
+  }, [periodDays]);
+
+  const runs = useMemo(() => {
+    const sorted = [...periodDays].sort();
+    const result = []; let current = [];
+    for (const k of sorted) {
+      if (current.length === 0 || (fromKey(k) - fromKey(current[current.length - 1])) / MS_DAY <= 1.5) current.push(k);
+      else { result.push(current); current = [k]; }
+    }
+    if (current.length) result.push(current);
+    return result;
+  }, [periodDays]);
+
+  const { starts, avgCycle, lengths: cycleLengths } = useMemo(() => computeCycles(periodStartKeys), [periodStartKeys]);
+  const lastStart = starts.length ? fromKey(starts[starts.length - 1]) : null;
+  const today = startOfDay(new Date());
+  const dayInCycle = lastStart ? Math.round((today - lastStart) / MS_DAY) + 1 : null;
+  const currentPhase = dayInCycle ? phaseForDay(dayInCycle, avgCycle) : null;
+  const nextPeriod = lastStart ? addDays(lastStart, avgCycle) : null;
+  const daysUntilNext = nextPeriod ? Math.round((nextPeriod - today) / MS_DAY) : null;
+  const ovulationDay = lastStart ? addDays(lastStart, avgCycle - 14) : null;
+
+  const gridDays = useMemo(() => {
+    const y = viewMonth.getFullYear(), m = viewMonth.getMonth();
+    const first = new Date(y, m, 1);
+    const startOffset = first.getDay();
+    const daysInMonth = new Date(y, m + 1, 0).getDate();
+    const cells = [];
+    for (let i = 0; i < startOffset; i++) cells.push(null);
+    for (let d = 1; d <= daysInMonth; d++) cells.push(new Date(y, m, d));
+    return cells;
+  }, [viewMonth]);
+
+  const isPredictedPeriod = (d) => {
+    if (!nextPeriod) return false;
+    for (let i = 0; i < avgPeriodLen; i++) if (sameDay(d, addDays(nextPeriod, i))) return true;
+    return false;
+  };
+  const isFertile = (d) => {
+    if (!ovulationDay) return false;
+    const diff = Math.round((d - ovulationDay) / MS_DAY);
+    return diff >= -5 && diff <= 1;
+  };
+
+  const monthLabel = viewMonth.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+
+  const historyByMonth = useMemo(() => {
+    const groups = {};
+    runs.forEach((run) => {
+      const mk = monthKey(fromKey(run[0]));
+      if (!groups[mk]) groups[mk] = [];
+      groups[mk].push(run);
+    });
+    return Object.entries(groups).sort((a, b) => (a[0] < b[0] ? 1 : -1));
+  }, [runs]);
+
+  const symptomCounts = useMemo(() => {
+    const counts = {};
+    Object.values(dayDetails).forEach((e) => (e.symptoms || []).forEach((s) => (counts[s] = (counts[s] || 0) + 1)));
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  }, [dayDetails]);
+  const moodCounts = useMemo(() => {
+    const counts = {};
+    Object.values(dayDetails).forEach((e) => { if (e.mood) counts[e.mood] = (counts[e.mood] || 0) + 1; });
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  }, [dayDetails]);
+  const maxSymptomCount = Math.max(1, ...symptomCounts.map(([, c]) => c));
+  const maxMoodCount = Math.max(1, ...moodCounts.map(([, c]) => c));
+  const maxCycleLen = Math.max(1, ...cycleLengths);
+  const maxPeriodLen = Math.max(1, ...runs.map((r) => r.length));
+
+  if (loading) {
+    return (
+      <div style={{ ...styles.app, alignItems: "center", justifyContent: "center", textAlign: "center" }}>
+        <div style={{ color: C.inkFaint, fontFamily: "'Inter', sans-serif", fontSize: 13, lineHeight: 1.6 }}>
+          Loading…
+          {waking && <div style={{ marginTop: 8 }}>Waking up the server — this can take up to 30 seconds on first load.</div>}
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div style={{ ...styles.app, alignItems: "center", justifyContent: "center", textAlign: "center", gap: 12 }}>
+        <div style={{ color: C.danger, fontFamily: "'Inter', sans-serif", fontSize: 13 }}>{loadError}</div>
+        <button style={{ ...styles.primaryBtn, flex: "none", padding: "10px 20px" }} onClick={loadEntries}>Retry</button>
+        <button style={styles.signOutBtn} onClick={onSignOut}>Sign out</button>
+      </div>
+    );
+  }
+
+  const showReminder = daysUntilNext !== null && daysUntilNext >= 0 && daysUntilNext <= 3;
+
+  return (
+    <React.Fragment>
+      <div className="no-print" style={styles.app}>
+        <header style={styles.headerRow}>
+          <div>
+            <div style={styles.eyebrow}>CYCLE</div>
+            <h1 style={styles.title}>Bloom</h1>
+          </div>
+          <div style={styles.userBadge}>
+            <button style={styles.themeToggle} onClick={toggleTheme} aria-label="Toggle dark mode">{darkMode ? "☀" : "☾"}</button>
+            <div style={styles.userEmail} title={email}>{email}</div>
+            <button style={styles.signOutBtn} onClick={onSignOut}>Sign out</button>
+          </div>
+        </header>
+
+        {showReminder && (
+          <div style={styles.reminderBanner}>
+            {daysUntilNext === 0 ? "Your period is expected today."
+              : `Reminder: your period is expected in ${daysUntilNext} day${daysUntilNext === 1 ? "" : "s"}. You'll also get an email.`}
+          </div>
+        )}
+
+        <div style={styles.tabs}>
+          {["track", "stats", "history"].map((t) => (
+            <button key={t} className="ptr-tab" style={{ ...styles.tabBtn, ...(tab === t ? styles.tabBtnActive : {}) }} onClick={() => setTab(t)}>
+              {t === "track" ? "Track" : t === "stats" ? "Stats" : "History"}
+            </button>
+          ))}
+        </div>
+
+        {tab === "track" && (
+          <React.Fragment>
+            <section style={styles.wheelCard}>
+              <PhaseWheel dayInCycle={dayInCycle} cycleLen={avgCycle} phase={currentPhase} C={C} />
+              <div style={styles.wheelText}>
+                {dayInCycle ? (
+                  <React.Fragment>
+                    <div style={styles.wheelDay}>Day {dayInCycle}</div>
+                    <div style={{ ...styles.wheelPhase, color: currentPhase.color }}>{currentPhase.label}</div>
+                    {daysUntilNext !== null && (
+                      <div style={styles.wheelSub}>
+                        {daysUntilNext > 0 ? `Next period in ${daysUntilNext} day${daysUntilNext === 1 ? "" : "s"}`
+                          : daysUntilNext === 0 ? "Period expected today"
+                          : `Period is ${Math.abs(daysUntilNext)} day${Math.abs(daysUntilNext) === 1 ? "" : "s"} late`}
+                      </div>
+                    )}
+                  </React.Fragment>
+                ) : (
+                  <React.Fragment>
+                    <div style={styles.wheelPhase}>No data yet</div>
+                    <div style={styles.wheelSub}>Tap a day below to begin</div>
+                  </React.Fragment>
+                )}
+              </div>
+            </section>
+
+            <section style={styles.calendarCard}>
+              <div style={styles.calNav}>
+                <button className="ptr-nav" style={styles.navBtn} onClick={() => setViewMonth(new Date(viewMonth.getFullYear(), viewMonth.getMonth() - 1, 1))} aria-label="Previous month">‹</button>
+                <div style={styles.monthLabel}>{monthLabel}</div>
+                <button className="ptr-nav" style={styles.navBtn} onClick={() => setViewMonth(new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 1, 1))} aria-label="Next month">›</button>
+              </div>
+              <div style={styles.weekRow}>{["S", "M", "T", "W", "T", "F", "S"].map((d, i) => <div key={i} style={styles.weekLabel}>{d}</div>)}</div>
+              <div style={styles.grid}>
+                {gridDays.map((d, i) => {
+                  if (!d) return <div key={i} />;
+                  const key = toKey(d);
+                  const entry = dayDetails[key];
+                  const isPeriod = !!(entry && entry.period);
+                  const hasNotes = !!(entry && !entry.period && ((entry.symptoms && entry.symptoms.length) || entry.mood));
+                  const predicted = !isPeriod && isPredictedPeriod(d);
+                  const fertile = !isPeriod && !predicted && isFertile(d);
+                  const isToday = sameDay(d, today);
+                  return (
+                    <button
+                      key={i} className="ptr-daybtn" onClick={() => setSheetDate(key)}
+                      style={{
+                        ...styles.dayCell,
+                        background: isPeriod ? C.rose : predicted ? C.roseSoft : fertile ? C.goldSoft : "transparent",
+                        color: isPeriod ? "#fff" : C.ink,
+                        border: isToday ? `1.5px solid ${C.plum}` : "1.5px solid transparent",
+                        fontWeight: isPeriod ? 600 : 500, position: "relative",
+                      }}
+                      aria-pressed={isPeriod}
+                      aria-label={`${d.toDateString()}${isPeriod ? ", period day" : ""}, tap to edit`}
+                    >
+                      {d.getDate()}
+                      {hasNotes && <span style={styles.noteDot} />}
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={styles.legend}>
+                <LegendDot color={C.rose} label="Logged period" C={C} />
+                <LegendDot color={C.roseSoft} label="Predicted period" C={C} />
+                <LegendDot color={C.goldSoft} label="Fertile window" C={C} />
+              </div>
+              <div style={styles.hint}>Tap any day to log period, flow, symptoms or mood.</div>
+            </section>
+
+            <section style={styles.statsRow}>
+              <StatCard label="Avg. cycle" value={`${avgCycle}d`} C={C} />
+              <StatCard label="Cycles logged" value={Math.max(0, starts.length)} C={C} />
+              <StatCard label="Next period" value={nextPeriod ? nextPeriod.toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "—"} C={C} />
+            </section>
+          </React.Fragment>
+        )}
+
+        {tab === "stats" && (
+          <section style={styles.historyWrap}>
+            {cycleLengths.length === 0 && runs.length === 0 ? (
+              <div style={styles.emptyState}>Log a couple of cycles to see your trends here.</div>
+            ) : (
+              <React.Fragment>
+                {cycleLengths.length > 0 && (
+                  <div style={styles.chartCard}>
+                    <div style={styles.chartTitle}>Cycle length (days)</div>
+                    {cycleLengths.map((len, i) => <BarRow key={i} label={`Cycle ${i + 1}`} count={len} max={maxCycleLen} color={C.plumSoft} C={C} />)}
+                  </div>
+                )}
+                {runs.length > 0 && (
+                  <div style={styles.chartCard}>
+                    <div style={styles.chartTitle}>Period length (days)</div>
+                    {runs.map((run, i) => <BarRow key={i} label={`Period ${i + 1}`} count={run.length} max={maxPeriodLen} color={C.rose} C={C} />)}
+                  </div>
+                )}
+                {symptomCounts.length > 0 && (
+                  <div style={styles.chartCard}>
+                    <div style={styles.chartTitle}>Most logged symptoms</div>
+                    {symptomCounts.map(([s, c]) => <BarRow key={s} label={s} count={c} max={maxSymptomCount} color={C.sage} C={C} />)}
+                  </div>
+                )}
+                {moodCounts.length > 0 && (
+                  <div style={styles.chartCard}>
+                    <div style={styles.chartTitle}>Mood log</div>
+                    {moodCounts.map(([m, c]) => <BarRow key={m} label={MOODS.find((x) => x.key === m)?.label || m} count={c} max={maxMoodCount} color={C.gold} C={C} />)}
+                  </div>
+                )}
+              </React.Fragment>
+            )}
+          </section>
+        )}
+
+        {tab === "history" && (
+          <section style={styles.historyWrap}>
+            {historyByMonth.length === 0 ? (
+              <div style={styles.emptyState}>No history yet. Log period days in Track and they'll show up here, grouped by month.</div>
+            ) : (
+              historyByMonth.map(([mk, monthRuns]) => (
+                <div key={mk} style={styles.historyMonth}>
+                  <div style={styles.historyMonthLabel}>{fromKey(`${mk}-01`).toLocaleDateString("en-US", { month: "long", year: "numeric" })}</div>
+                  {monthRuns.map((run, idx) => {
+                    const startD = fromKey(run[0]), endD = fromKey(run[run.length - 1]);
+                    const flows = run.map((k) => dayDetails[k]?.flow).filter(Boolean);
+                    return (
+                      <div key={idx} style={styles.historyEntry}>
+                        <div>
+                          <div style={styles.historyDates}>
+                            {startD.toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                            {run.length > 1 && ` – ${endD.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`}
+                          </div>
+                          <div style={styles.historyLen}>
+                            {run.length} day{run.length === 1 ? "" : "s"}
+                            {flows.length > 0 && ` · ${flows[0]}${flows.length > 1 ? ` – ${flows[flows.length - 1]}` : ""} flow`}
+                          </div>
+                        </div>
+                        <button style={styles.deleteBtn} onClick={() => deleteEntryRange(run)} aria-label="Delete this entry">Delete</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))
+            )}
+
+            {historyByMonth.length > 0 && (
+              <button style={styles.exportBtn} onClick={() => window.print()}>Export / Print (Save as PDF)</button>
+            )}
+
+            {historyByMonth.length > 0 && (
+              <div style={styles.resetWrap}>
+                {!confirmReset ? (
+                  <button style={styles.resetBtn} onClick={() => setConfirmReset(true)}>Reset all history</button>
+                ) : (
+                  <div style={styles.confirmBox}>
+                    <div style={{ fontSize: 13, marginBottom: 8 }}>This deletes every logged entry for {email} from the server. This can't be undone.</div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button style={styles.resetBtnConfirm} onClick={resetAll}>Yes, clear everything</button>
+                      <button style={styles.cancelBtn} onClick={() => setConfirmReset(false)}>Cancel</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        )}
+
+        {toast && <div style={styles.toast}>{toast}</div>}
+
+        {sheetDate && (
+          <DaySheet
+            dateKey={sheetDate}
+            entry={dayDetails[sheetDate] || { period: false, flow: null, symptoms: [], mood: null }}
+            onClose={() => setSheetDate(null)}
+            onSave={(entry) => { saveDay(sheetDate, entry); setSheetDate(null); }}
+            C={C}
+          />
+        )}
+      </div>
+
+      <div className="print-only" style={{ padding: 24, fontFamily: "Georgia, serif", color: "#000" }}>
+        <h1 style={{ marginBottom: 2 }}>Bloom — Cycle History</h1>
+        <div style={{ fontSize: 12, marginBottom: 16 }}>{email} · exported {new Date().toLocaleDateString()}</div>
+        <div style={{ fontSize: 13, marginBottom: 16 }}>Average cycle length: {avgCycle} days · Cycles logged: {starts.length}</div>
+        {historyByMonth.map(([mk, monthRuns]) => (
+          <div key={mk} style={{ marginBottom: 14 }}>
+            <div style={{ fontWeight: "bold", marginBottom: 4 }}>{fromKey(`${mk}-01`).toLocaleDateString("en-US", { month: "long", year: "numeric" })}</div>
+            {monthRuns.map((run, idx) => {
+              const startD = fromKey(run[0]), endD = fromKey(run[run.length - 1]);
+              return (
+                <div key={idx} style={{ fontSize: 12, marginBottom: 2 }}>
+                  {startD.toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                  {run.length > 1 && ` – ${endD.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`}
+                  {" · "}{run.length} day{run.length === 1 ? "" : "s"}
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+    </React.Fragment>
+  );
+}
+
+function DaySheet({ dateKey, entry, onClose, onSave, C }) {
+  const styles = getStyles(C);
+  const [period, setPeriod] = useState(entry.period);
+  const [flow, setFlow] = useState(entry.flow);
+  const [symptoms, setSymptoms] = useState(entry.symptoms || []);
+  const [mood, setMood] = useState(entry.mood);
+  const dateLabel = fromKey(dateKey).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+  const toggleSymptom = (s) => setSymptoms((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
+
+  return (
+    <div style={styles.sheetOverlay} onClick={onClose}>
+      <div style={styles.sheet} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.sheetHandle} />
+        <div style={styles.sheetTitle}>{dateLabel}</div>
+
+        <div style={styles.sheetSectionLabel}>Period day</div>
+        <button className="ptr-chip" style={{ ...styles.periodToggle, background: period ? C.rose : "transparent", color: period ? "#fff" : C.ink, borderColor: C.rose }} onClick={() => setPeriod((p) => !p)}>
+          {period ? "Marked as period day" : "Mark as period day"}
+        </button>
+
+        {period && (
+          <React.Fragment>
+            <div style={styles.sheetSectionLabel}>Flow</div>
+            <div style={styles.chipRow}>
+              {FLOWS.map((f) => (
+                <button key={f.key} className="ptr-chip" onClick={() => setFlow(flow === f.key ? null : f.key)}
+                  style={{ ...styles.chip, background: flow === f.key ? C.rose : "transparent", color: flow === f.key ? "#fff" : C.ink, borderColor: C.roseSoft }}>
+                  {f.label}
+                </button>
+              ))}
+            </div>
+          </React.Fragment>
+        )}
+
+        <div style={styles.sheetSectionLabel}>Symptoms</div>
+        <div style={styles.chipRow}>
+          {SYMPTOMS.map((s) => (
+            <button key={s} className="ptr-chip" onClick={() => toggleSymptom(s)}
+              style={{ ...styles.chip, background: symptoms.includes(s) ? C.sage : "transparent", color: symptoms.includes(s) ? "#fff" : C.ink, borderColor: C.sageSoft }}>
+              {s}
+            </button>
+          ))}
+        </div>
+
+        <div style={styles.sheetSectionLabel}>Mood</div>
+        <div style={styles.chipRow}>
+          {MOODS.map((m) => (
+            <button key={m.key} className="ptr-chip" onClick={() => setMood(mood === m.key ? null : m.key)}
+              style={{ ...styles.chip, background: mood === m.key ? C.gold : "transparent", color: mood === m.key ? "#fff" : C.ink, borderColor: C.goldSoft }}>
+              {m.label}
+            </button>
+          ))}
+        </div>
+
+        <div style={styles.sheetActions}>
+          <button style={styles.cancelBtn} onClick={onClose}>Cancel</button>
+          <button style={styles.primaryBtn} onClick={() => onSave({ period, flow: period ? flow : null, symptoms, mood })}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PhaseWheel({ dayInCycle, cycleLen, phase, C }) {
+  const size = 148, r = 62, cx = size / 2, cy = size / 2;
+  const segments = []; let cursor = 0;
+  PHASES.forEach((p) => {
+    const [, hi] = p.range;
+    const scaledHi = Math.min(cycleLen, (hi / 28) * cycleLen);
+    const a0 = (cursor / cycleLen) * 360 - 90;
+    const a1 = (scaledHi / cycleLen) * 360 - 90;
+    cursor = scaledHi;
+    segments.push({ ...p, a0, a1 });
+  });
+  const polar = (angleDeg, radius) => { const rad = (angleDeg * Math.PI) / 180; return [cx + radius * Math.cos(rad), cy + radius * Math.sin(rad)]; };
+  const arcPath = (a0, a1, radius) => {
+    const [x0, y0] = polar(a0, radius), [x1, y1] = polar(a1, radius);
+    const large = a1 - a0 > 180 ? 1 : 0;
+    return `M ${x0} ${y0} A ${radius} ${radius} 0 ${large} 1 ${x1} ${y1}`;
+  };
+  const markerAngle = dayInCycle ? (Math.min(dayInCycle, cycleLen) / cycleLen) * 360 - 90 : -90;
+  const [mx, my] = polar(markerAngle, r);
+
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ flexShrink: 0 }}>
+      {segments.map((s, i) => (
+        <path key={i} d={arcPath(s.a0, s.a1, r)} fill="none" stroke={s.color} strokeWidth={10} strokeLinecap="round" opacity={phase && phase.key === s.key ? 1 : 0.35} />
+      ))}
+      <circle cx={cx} cy={cy} r={38} fill={C.card} stroke={C.roseSoft} strokeWidth={1} />
+      {dayInCycle && (
+        <circle cx={mx} cy={my} r={6} fill={C.plum} stroke={C.card} strokeWidth={2} style={{ transition: "cx 0.4s ease, cy 0.4s ease" }} />
+      )}
+    </svg>
+  );
+}
+
+function LegendDot({ color, label, C }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+      <span style={{ width: 8, height: 8, borderRadius: 4, display: "inline-block", background: color }} />
+      <span style={{ fontSize: 11, color: C.inkFaint }}>{label}</span>
+    </div>
+  );
+}
+
+function StatCard({ label, value, C }) {
+  const styles = getStyles(C);
+  return (
+    <div style={styles.statCard}>
+      <div style={styles.statValue}>{value}</div>
+      <div style={styles.statLabel}>{label}</div>
+    </div>
+  );
+}
+
+function BarRow({ label, count, max, color, C }) {
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: C.ink, marginBottom: 3 }}>
+        <span>{label}</span><span style={{ color: C.inkFaint }}>{count}</span>
+      </div>
+      <div style={{ height: 6, borderRadius: 3, background: C.sageSoft, overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${(count / max) * 100}%`, background: color, borderRadius: 3 }} />
+      </div>
+    </div>
+  );
+}
+
+function getStyles(C) {
+  return {
+    app: { minHeight: "100vh", background: C.paper, fontFamily: "'Inter', sans-serif", color: C.ink, padding: "20px 16px 32px", maxWidth: 420, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 },
+    headerRow: { display: "flex", alignItems: "flex-start", justifyContent: "space-between" },
+    eyebrow: { fontSize: 11, letterSpacing: "0.16em", color: C.inkFaint, fontWeight: 600 },
+    title: { fontFamily: "'Fraunces', serif", fontWeight: 500, fontSize: 34, margin: "2px 0 0", color: C.plum },
+    userBadge: { display: "flex", alignItems: "center", gap: 10 },
+    userEmail: { fontSize: 11, color: C.inkFaint, maxWidth: 100, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+    signOutBtn: { background: "none", border: "none", color: C.plum, fontSize: 11, fontWeight: 600, cursor: "pointer", padding: "2px 0" },
+    themeToggle: { background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, width: 30, height: 30, cursor: "pointer", fontSize: 14 },
+    themeToggleStandalone: { background: "none", border: "none", color: C.inkFaint, fontSize: 12, marginTop: 16, cursor: "pointer", textAlign: "center" },
+    reminderBanner: { background: C.goldSoft, color: C.plum, fontSize: 13, fontWeight: 500, padding: "10px 14px", borderRadius: 12 },
+    tabs: { display: "flex", gap: 6, background: C.card, borderRadius: 12, padding: 4 },
+    tabBtn: { flex: 1, padding: "8px 0", border: "none", background: "none", borderRadius: 9, fontSize: 13, fontWeight: 600, color: C.inkFaint, cursor: "pointer" },
+    tabBtnActive: { background: C.plum, color: C.paper },
+    wheelCard: { background: C.card, borderRadius: 20, padding: 18, display: "flex", alignItems: "center", gap: 16, boxShadow: C.shadow },
+    wheelText: { flex: 1, minWidth: 0 },
+    wheelDay: { fontFamily: "'Fraunces', serif", fontSize: 13, color: C.inkFaint, fontWeight: 500 },
+    wheelPhase: { fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 600, color: C.plum, margin: "2px 0 6px" },
+    wheelSub: { fontSize: 13, color: C.inkFaint, lineHeight: 1.4 },
+    calendarCard: { background: C.card, borderRadius: 20, padding: "16px 14px 12px", boxShadow: C.shadow },
+    calNav: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
+    navBtn: { background: "none", border: "none", fontSize: 22, color: C.plum, cursor: "pointer", width: 32, height: 32, borderRadius: 8 },
+    monthLabel: { fontFamily: "'Fraunces', serif", fontWeight: 500, fontSize: 16, color: C.plum },
+    weekRow: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", marginBottom: 4 },
+    weekLabel: { textAlign: "center", fontSize: 11, color: C.inkFaint, fontWeight: 600 },
+    grid: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", rowGap: 4, columnGap: 2 },
+    dayCell: { aspectRatio: "1", borderRadius: 10, fontSize: 13, cursor: "pointer", fontFamily: "'Inter', sans-serif" },
+    noteDot: { position: "absolute", bottom: 3, left: "50%", transform: "translateX(-50%)", width: 4, height: 4, borderRadius: 2, background: C.gold },
+    legend: { display: "flex", flexWrap: "wrap", gap: 12, marginTop: 12 },
+    hint: { fontSize: 11, color: C.inkFaint, marginTop: 8, fontStyle: "italic" },
+    statsRow: { display: "flex", gap: 10 },
+    statCard: { flex: 1, background: C.card, borderRadius: 16, padding: "14px 8px", textAlign: "center", boxShadow: C.shadow },
+    statValue: { fontFamily: "'Fraunces', serif", fontSize: 20, fontWeight: 600, color: C.plum },
+    statLabel: { fontSize: 10.5, color: C.inkFaint, marginTop: 2 },
+    toast: { position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", background: C.plum, color: C.paper, padding: "8px 16px", borderRadius: 10, fontSize: 13 },
+    loginCard: { background: C.card, borderRadius: 20, padding: 20, boxShadow: C.shadow, display: "flex", flexDirection: "column", gap: 8 },
+    label: { fontSize: 12, fontWeight: 600, color: C.plum },
+    input: { border: `1.5px solid ${C.roseSoft}`, borderRadius: 10, padding: "10px 12px", fontSize: 14, fontFamily: "'Inter', sans-serif", color: C.ink, outline: "none", background: C.paper },
+    errorText: { fontSize: 12, color: C.danger },
+    primaryBtn: { flex: 1, background: C.plum, color: C.paper, border: "none", borderRadius: 10, padding: "11px 0", fontSize: 14, fontWeight: 600, cursor: "pointer", marginTop: 4 },
+    note: { fontSize: 11, color: C.inkFaint, lineHeight: 1.5, marginTop: 4 },
+    historyWrap: { display: "flex", flexDirection: "column", gap: 14 },
+    historyMonth: { background: C.card, borderRadius: 16, padding: 14, boxShadow: C.shadow },
+    historyMonthLabel: { fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 15, color: C.plum, marginBottom: 8 },
+    historyEntry: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 0", borderTop: `1px solid ${C.border}` },
+    historyDates: { fontSize: 13.5, fontWeight: 500, color: C.ink },
+    historyLen: { fontSize: 11.5, color: C.inkFaint, marginTop: 1 },
+    deleteBtn: { background: "none", border: "none", color: C.danger, fontSize: 12, fontWeight: 600, cursor: "pointer" },
+    emptyState: { background: C.card, borderRadius: 16, padding: 24, textAlign: "center", color: C.inkFaint, fontSize: 13, lineHeight: 1.6 },
+    exportBtn: { background: "none", border: `1.5px solid ${C.plum}`, color: C.plum, borderRadius: 10, padding: "10px 0", fontSize: 13, fontWeight: 600, cursor: "pointer" },
+    resetWrap: { marginTop: 4 },
+    resetBtn: { width: "100%", background: "none", border: `1.5px solid ${C.danger}`, color: C.danger, borderRadius: 10, padding: "10px 0", fontSize: 13, fontWeight: 600, cursor: "pointer" },
+    confirmBox: { background: C.card, borderRadius: 14, padding: 14, boxShadow: C.shadow },
+    resetBtnConfirm: { flex: 1, background: C.danger, color: "#fff", border: "none", borderRadius: 9, padding: "9px 0", fontSize: 13, fontWeight: 600, cursor: "pointer" },
+    cancelBtn: { flex: 1, background: "none", border: `1px solid ${C.inkFaint}`, color: C.ink, borderRadius: 9, padding: "9px 0", fontSize: 13, fontWeight: 600, cursor: "pointer" },
+    chartCard: { background: C.card, borderRadius: 16, padding: 14, boxShadow: C.shadow },
+    chartTitle: { fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 14, color: C.plum, marginBottom: 8 },
+    sheetOverlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "flex-end", zIndex: 50 },
+    sheet: { background: C.paper, width: "100%", maxWidth: 420, margin: "0 auto", borderRadius: "20px 20px 0 0", padding: "10px 18px 20px", maxHeight: "85vh", overflowY: "auto" },
+    sheetHandle: { width: 36, height: 4, borderRadius: 2, background: C.border, margin: "0 auto 12px" },
+    sheetTitle: { fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 17, color: C.plum, marginBottom: 12 },
+    sheetSectionLabel: { fontSize: 12, fontWeight: 600, color: C.inkFaint, marginTop: 14, marginBottom: 6 },
+    periodToggle: { width: "100%", border: "1.5px solid", borderRadius: 10, padding: "10px 0", fontSize: 13, fontWeight: 600, cursor: "pointer" },
+    chipRow: { display: "flex", flexWrap: "wrap", gap: 6 },
+    chip: { border: "1.5px solid", borderRadius: 20, padding: "6px 12px", fontSize: 12.5, fontWeight: 500, cursor: "pointer" },
+    sheetActions: { display: "flex", gap: 8, marginTop: 20 },
+  };
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<PeriodTrackerApp />);
+</script>
+</body>
+</html>
